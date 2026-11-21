@@ -1,0 +1,25 @@
+# Build outputs & local caches
+build/
+dist/
+*.app/
+*.o
+*.dylib
+*.a
+*.ll
+*.bc
+*.dSYM/
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+
+# Never commit game binaries, game assets, or private dumps
+*.exe
+CoDBlkOps3_Exe*
+*.ff
+*.xpak
+*.metallib
+*.dxbc
+*.cache
+manifests/*.bin
+third_party/zydis/
