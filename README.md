@@ -17,7 +17,7 @@ Play **Call of Duty: Black Ops III** natively on **any Apple Silicon Mac** (**M1
   - Switch MetalFX Spatial resolutions **directly inside BO3's own Graphics → Display Resolution menu** (native-aspect `75%` and `80%` modes are added automatically alongside native resolution).
 - **Simple Double-Click Launcher (`BO3 Mac.app`):** No terminal commands needed after installation — just double-click **`BO3 Mac`** in `/Applications`.
 - **Release-Grade Zero-Overhead Runtime:** Compiled with `-O3 -DNDEBUG` with zero developer validation layers, zero background profiling, and zero console log spam during normal play.
-- **Online Zombies & Multiplayer Ready:** Connects directly to the native arm64 Steam desktop client with **Friends-Only lobby/P2P protection enabled by default** and Windows v100 cross-play protocol support.
+- **Online Zombies, Multiplayer & Steam Workshop Ready:** Connects directly to the native arm64 Steam desktop client with **Friends-Only lobby/P2P protection enabled by default**, Windows v100 cross-play protocol support, and full **Steam Workshop Mods & Custom Maps** support (native in-process Havok navigation conversion with zero Wine and zero Rosetta 2).
 
 ---
 
@@ -101,7 +101,8 @@ Measured over a 10-minute sustained **Shadows of Evil Round 15** stress test (Sh
 
 - **Steam Online:** Open the Steam desktop app before launching `BO3 Mac.app`. You can invite and join Steam friends normally in Zombies and Multiplayer.
 - **Friends-Only Safety Guard (ON by default):** Protects your session from uninvited non-friend lobby joins and P2P packets. Uncheck it in `BO3 Mac.app` or press `F10` in-game if you intentionally want to join a public lobby.
-- **Windows Cross-Play:** `./install.sh` applies the 28 verified protocol/changelist/timeout adjustments during local ARM64 compilation (never modifying Steam's binary) so macOS clients speak Windows v100 wire protocol. If you also have Windows v100 zone patch fastfiles (`core_patch.ff`, `mp_patch.ff`, `zm_patch.ff`), place them in `~/Library/Application Support/bo3mac/zone/` (or set `BO3MAC_ZONE_OVERLAY_DIR`) for read-only overlay mounting without touching Steam's files.
+- **Windows Cross-Play:** `./install.sh` applies the verified protocol/changelist/timeout adjustments during local ARM64 compilation (never modifying Steam's binary) so macOS clients speak Windows v100 wire protocol. If you also have Windows v100 zone patch fastfiles (`core_patch.ff`, `mp_patch.ff`, `zm_patch.ff`), place them in `~/Library/Application Support/bo3mac/zone/` (or set `BO3MAC_ZONE_OVERLAY_DIR`) for read-only overlay mounting without touching Steam's files.
+- **Steam Workshop Mods & Custom Maps:** Subscribe to custom maps and mods in Steam normally — `bo3mac` natively converts Windows Havok navigation meshes/volumes (`_navmesh.hkt` / `_navvolume.hkt`) in-process on Apple Silicon into `~/Library/Application Support/bo3mac/Physics/` (with SHA-256 cache receipts), fixes Aspyr's fatal GSC script-error override and Workshop preview texture crash, enables Lua `io.open` (`hksf_fopen`, sandboxed to the Black Ops III game folder), and repairs known script issues (such as One Barrier Roulette V2).
 - **Offline Solo Mode:** Toggle **Offline Mode** in `BO3 Mac.app` (or pass `--offline` via CLI) to play solo Zombies or Campaign without running Steam.
 
 ---
@@ -158,6 +159,8 @@ For deep technical documentation on the zero-slide Mach-O loader, Zydis → LLVM
 
 ---
 
-## License
+## License & Acknowledgments
 
 Released under the [MIT License](LICENSE). Uses [Zydis](https://github.com/zyantific/zydis) (MIT License) during local compilation.
+
+Steam Workshop and cross-play macOS engine hook targets and offsets draw on research from [BO3MacFix](https://github.com/InvoxiPlayGames/BO3MacFix) (by Emma / InvoxiPlayGames and Anthony / serious, LGPL-2.1). The clean-room native Havok navigation converter and Roulette callback fix are shared with [BO3MacFix-mawlicious](https://github.com/mawlicious/BO3MacFix-mawlicious).

@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
     std::string out_path;
     uint64_t min_va = 0x1004a0000ULL;
     uint64_t max_va = 0x1016263d8ULL;
+    std::unordered_set<uint64_t> wrap_vas;
 
     auto parse_flags = [&](int start) -> bool {
         for (int i = start; i < argc; i++) {
@@ -41,6 +42,7 @@ int main(int argc, char **argv) {
             if (a == "-o" && i + 1 < argc) out_path = argv[++i];
             else if (a == "--min-va" && i + 1 < argc) min_va = parse_hex(argv[++i]);
             else if (a == "--max-va" && i + 1 < argc) max_va = parse_hex(argv[++i]);
+            else if (a == "--wrap-va" && i + 1 < argc) wrap_vas.insert(parse_hex(argv[++i]));
             else if (a == "--cc" && i + 1 < argc) {
                 std::string c = argv[++i];
                 opts.cc = (c == "full") ? bo3::CallConv::FullState : bo3::CallConv::SupersetSysV;
@@ -228,8 +230,14 @@ int main(int argc, char **argv) {
         for (uint64_t fva : my_funcs) {
             bo3::FunctionCFG cfg;
             if (!bo3::build_function_cfg(img, fva, cfg, false)) continue;
-            defined_syms.insert(em.func_symbol(fva));
-            em.emit_function(cfg, body);
+            if (wrap_vas.count(fva)) {
+                std::string orig_name = "orig_g_" + em.fmt_va(fva);
+                defined_syms.insert("@" + orig_name);
+                em.emit_function(cfg, body, orig_name);
+            } else {
+                defined_syms.insert(em.func_symbol(fva));
+                em.emit_function(cfg, body);
+            }
         }
         for (const auto &ds : defined_syms) em.extern_guest_funcs_.erase(ds);
 

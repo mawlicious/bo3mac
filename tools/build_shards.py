@@ -37,6 +37,12 @@ MCPU = detect_apple_mcpu()
 MIN_VA = "0x1004a0000"
 MAX_VA = "0x1016263d8"
 LIFTER = os.path.join(ROOT, "build", "bo3_lift")
+WRAP_VAS = [
+    "0x100e09aa9",  # HKAI_InitMapData (native Havok nav conversion wrapper)
+    "0x101345b12",  # DB_FindXAssetHeader (Roulette V2 script callback fix)
+    "0x100f16d9a",  # Com_GetBuildIntField (Mac! compatibility probe)
+]
+WRAP_ARGS = [arg for va in WRAP_VAS for arg in ("--wrap-va", va)]
 
 def build_one(idx):
     t0 = time.time()
@@ -45,7 +51,7 @@ def build_one(idx):
     tmp_o   = f"{o_path}.tmp.{os.getpid()}"
     r1 = subprocess.run(
         [LIFTER, "--shard", EXE, MIN_VA, MAX_VA, str(idx), str(NUM_SHARDS),
-         "--tso", TSO, "--mcpu", MCPU, "-o", ll_path],
+         "--tso", TSO, "--mcpu", MCPU, *WRAP_ARGS, "-o", ll_path],
         capture_output=True, text=True
     )
     if r1.returncode != 0:

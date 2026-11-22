@@ -8,8 +8,14 @@ RT="$CACHE/rt_objs"
 GEN="$CACHE/m2_gen"
 mkdir -p "$RT"
 
-# Generate M2 symbol registry & weak Aspyr stubs if missing (first-time setup on a fresh Mac)
+# Generate M2 symbol registry & weak Aspyr stubs if missing or if any core shard changed
+NEED_GEN=0
 if [ ! -f "$GEN/gen_registry.c" ] || [ ! -f "$GEN/gen_extra_reg.c" ] || [ ! -f "$GEN/gen_binds.c" ] || [ ! -f "$GEN/gen_aspyr_weak.c" ]; then
+    NEED_GEN=1
+elif [ -n "$(find "$CACHE/core_shards" -maxdepth 1 -name 'shard_*.o' -newer "$GEN/gen_registry.c" -print -quit 2>/dev/null)" ]; then
+    NEED_GEN=1
+fi
+if [ "$NEED_GEN" -eq 1 ]; then
     echo "[build_m3] Generating symbol registry and bind tables..."
     python3 "$ROOT/tools/gen_m2_glue.py"
 fi
@@ -29,6 +35,10 @@ clang "${CFLAGS[@]}" -c "$ROOT/runtime/shim_aspyr_os.c" -o "$RT/shim_aspyr_os.o"
 clang "${CFLAGS[@]}" -c "$ROOT/runtime/shim_aspyr_win32.c" -o "$RT/shim_aspyr_win32.o"
 clang "${CFLAGS[@]}" -c "$ROOT/runtime/shim_curl_zlib_steam.c" -o "$RT/shim_curl_zlib_steam.o"
 clang "${CFLAGS[@]}" -c "$ROOT/runtime/steam_bridge.c" -o "$RT/steam_bridge.o"
+clang "${CFLAGS[@]}" -c "$ROOT/runtime/havok_convert.c" -o "$RT/havok_convert.o"
+clang "${CFLAGS[@]}" -c "$ROOT/runtime/nav_convert.c" -o "$RT/nav_convert.o"
+clang "${CFLAGS[@]}" -c "$ROOT/runtime/script_fixes.c" -o "$RT/script_fixes.o"
+clang "${CFLAGS[@]}" -c "$ROOT/runtime/workshop_mac.c" -o "$RT/workshop_mac.o"
 
 # Compile generated M2 glue objects if missing or newer than .o
 for gf in gen_aspyr_weak gen_binds gen_registry gen_extra_reg; do
@@ -58,6 +68,10 @@ RT_OBJS=(
     "$RT/shim_aspyr_win32.o"
     "$RT/shim_curl_zlib_steam.o"
     "$RT/steam_bridge.o"
+    "$RT/havok_convert.o"
+    "$RT/nav_convert.o"
+    "$RT/script_fixes.o"
+    "$RT/workshop_mac.o"
     "$RT/gen_aspyr_weak.o"
     "$RT/gen_binds.o"
     "$RT/gen_registry.o"

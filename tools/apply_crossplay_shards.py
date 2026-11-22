@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Relift only the 17 Core BO3 shards affected by Windows v100 cross-play & 30s join timeout.
+"""Relift the Core BO3 shards affected by Workshop/Custom-Map compatibility and optional Windows v100 cross-play.
 
 Creates a verified exclusive temporary copy of CoDBlkOps3_Exe in the local cache directory,
-applies only the 28 verified protocol/changelist/timeout byte edits (never mutating the stock
-game binary on disk), relifts+compiles all 17 affected shards into a staging directory tuned
-for the host Apple Silicon CPU, and atomically replaces all 17 .o files ONLY if every shard succeeds.
+applies verified byte edits (never mutating the stock game binary on disk), relifts+compiles
+the affected shards into a staging directory tuned for the host Apple Silicon CPU, and
+atomically replaces all affected .o files ONLY if every shard succeeds.
 """
+from __future__ import annotations
 import concurrent.futures
 import hashlib
 import os
@@ -33,9 +34,30 @@ MCPU = detect_apple_mcpu()
 MIN_VA = "0x1004a0000"
 MAX_VA = "0x1016263d8"
 
-# Exact file-offset byte edits: (file_offset, expected_old_hex, new_hex, description)
-# Verified against stock macOS Steam CoDBlkOps3_Exe (SHA-256 932f0918...).
-PATCHES = [
+# Core BO3 functions wrapped by runtime/workshop_mac.c (emitted as orig_g_<va>).
+WORKSHOP_WRAPS = [
+    "0x100e09aa9",  # HKAI_InitMapData (shard 057)
+    "0x101345b12",  # DB_FindXAssetHeader (shard 062)
+    "0x100f16d9a",  # Com_GetBuildIntField (shard 041)
+]
+WRAP_ARGS = [arg for va in WORKSHOP_WRAPS for arg in ("--wrap-va", va)]
+
+# Always-on Workshop mods & custom maps fixes (applied in both cross-play and stock v98 modes).
+# Engine patch offsets follow upstream BO3MacFix (InvoxiPlayGames).
+WORKSHOP_PATCHES = [
+    # Scr_ErrorInternal: Aspyr forces all GSC script errors to be fatal (1 -> 0); Windows treats non-fatal errors as non-fatal.
+    (0x11a2392, "01",         "00",         "Scr_ErrorInternal non-fatal (g_1011a2292, shard 042)"),
+    # Lua_CmdParseArgs: early ret prevents crashes in Workshop mods parsing Lua commands.
+    (0x1408cf9, "55",         "c3",         "Lua_CmdParseArgs crash fix (g_101408cf9, shard 062)"),
+    # load_workshop_texture: Aspyr's PNG->texture loader crashes on Workshop previews; return NULL cleanly.
+    (0x0e4a26c, "554889e5",   "31c0c390",   "load_workshop_texture -> NULL (g_100e4a26c, shard 073)"),
+    # HKAI_InitMapData: force strcmp(mapname, "cp_mi_cairo_infection2") -> 0 (matching upstream BO3MacFix)
+    # so every map uses Aspyr's two-file disk .hkt load path compatible with converted custom nav files.
+    (0x0e09f68, "e82bdd8100", "b800000000", "HKAI_InitMapData DemonWithinCheck -> 0 (g_100e09aa9, shard 057)"),
+]
+
+# Optional Windows v100 online cross-play & 30s join timeout patches.
+CROSSPLAY_PATCHES = [
     # 24x wire protocol version 0x4862 (18530) -> 0x4864 (18532)
     (0x0e078e4, "6248",     "6448",     "protocol 0x4862->0x4864 (g_100e07879, shard 047)"),
     (0x0e181d3, "6248",     "6448",     "protocol 0x4862->0x4864 (g_100e17e98, shard 071)"),
@@ -71,13 +93,15 @@ PATCHES = [
     (0x1315ffc, "10270000", "30750000", "Lobby join-info timeout 10000->30000ms (g_101315623, shard 063)"),
 ]
 
-AFFECTED_SHARDS = [17, 25, 28, 32, 36, 41, 47, 49, 53, 55, 59, 63, 64, 71, 72, 74, 76]
+WORKSHOP_SHARDS = [41, 42, 57, 62, 73]
+CROSSPLAY_SHARDS = [17, 25, 28, 32, 36, 41, 47, 49, 53, 55, 59, 63, 64, 71, 72, 74, 76]
+ALL_SHARDS = sorted(set(WORKSHOP_SHARDS) | set(CROSSPLAY_SHARDS))
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "apply"
-    if mode not in ("apply", "revert"):
-        sys.exit("Usage: apply_crossplay_shards.py [apply|revert]")
+    if mode not in ("apply", "revert", "workshop"):
+        sys.exit("Usage: apply_crossplay_shards.py [apply|revert|workshop]")
 
     if not STOCK_EXE:
         sys.exit("Could not locate Steam BO3 CoDBlkOps3_Exe (set BO3_GAME_DIR)")
@@ -88,30 +112,42 @@ def main():
     if digest != STOCK_SHA256:
         sys.exit(f"Stock executable SHA-256 mismatch: got {digest}, expected {STOCK_SHA256}")
 
+    if mode == "apply":
+        patches = WORKSHOP_PATCHES + CROSSPLAY_PATCHES
+        target_shards = ALL_SHARDS
+        label = "Workshop + Windows v100 cross-play"
+    elif mode == "workshop":
+        patches = WORKSHOP_PATCHES
+        target_shards = WORKSHOP_SHARDS
+        label = "Workshop + custom maps (stock v98)"
+    else:
+        patches = WORKSHOP_PATCHES
+        target_shards = ALL_SHARDS
+        label = "revert cross-play to stock v98 (keep Workshop)"
+
     stage_dir = tempfile.mkdtemp(prefix=".crossplay_stage_", dir=OUT_DIR)
     tmp_exe = None
     try:
-        if mode == "apply":
-            for off, old_hex, new_hex, desc in PATCHES:
-                old_b = bytes.fromhex(old_hex)
-                new_b = bytes.fromhex(new_hex)
-                assert len(old_b) == len(new_b), desc
-                cur = bytes(data[off : off + len(old_b)])
-                if cur != old_b:
-                    sys.exit(f"Byte mismatch at 0x{off:x} ({desc}): got {cur.hex()}, expected {old_hex}")
-                data[off : off + len(new_b)] = new_b
-            fd, tmp_exe = tempfile.mkstemp(prefix="CoDBlkOps3_Exe.xp_", dir=stage_dir)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-            except BaseException:
-                os.unlink(tmp_exe)
-                raise
-            lift_exe = tmp_exe
-            print(f"[crossplay-shards] Verified & patched {len(PATCHES)} sites -> staging {len(AFFECTED_SHARDS)} shards (mcpu={MCPU})...", flush=True)
-        else:
-            lift_exe = STOCK_EXE
-            print(f"[crossplay-shards] Reverting {len(AFFECTED_SHARDS)} shards to stock v98 in staging (mcpu={MCPU})...", flush=True)
+        for off, old_hex, new_hex, desc in patches:
+            old_b = bytes.fromhex(old_hex)
+            new_b = bytes.fromhex(new_hex)
+            assert len(old_b) == len(new_b), desc
+            cur = bytes(data[off : off + len(old_b)])
+            if cur != old_b:
+                sys.exit(f"Byte mismatch at 0x{off:x} ({desc}): got {cur.hex()}, expected {old_hex}")
+            data[off : off + len(new_b)] = new_b
+        fd, tmp_exe = tempfile.mkstemp(prefix="CoDBlkOps3_Exe.xp_", dir=stage_dir)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except BaseException:
+            os.unlink(tmp_exe)
+            raise
+        lift_exe = tmp_exe
+        print(
+            f"[shards] {label}: verified & patched {len(patches)} sites -> staging {len(target_shards)} shards (mcpu={MCPU})...",
+            flush=True,
+        )
 
         def build_one(idx):
             t0 = time.time()
@@ -119,7 +155,7 @@ def main():
             o_path  = os.path.join(stage_dir, f"shard_{idx:03d}.o")
             r1 = subprocess.run(
                 [LIFTER, "--shard", lift_exe, MIN_VA, MAX_VA, str(idx), str(NUM_SHARDS),
-                 "--tso", TSO, "--mcpu", MCPU, "-o", ll_path],
+                 "--tso", TSO, "--mcpu", MCPU, *WRAP_ARGS, "-o", ll_path],
                 capture_output=True, text=True,
             )
             if r1.returncode != 0:
@@ -139,26 +175,34 @@ def main():
         ok = 0
         fail = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = [ex.submit(build_one, i) for i in AFFECTED_SHARDS]
+            futs = [ex.submit(build_one, i) for i in target_shards]
             for fut in concurrent.futures.as_completed(futs):
                 idx, is_ok, msg = fut.result()
                 if is_ok:
                     ok += 1
-                    print(f"[{ok}/{len(AFFECTED_SHARDS)}] shard {idx:03d} OK ({msg})", flush=True)
+                    print(f"[{ok}/{len(target_shards)}] shard {idx:03d} OK ({msg})", flush=True)
                 else:
                     fail += 1
                     print(f"FAIL shard {idx:03d}: {msg}", file=sys.stderr, flush=True)
 
         if fail != 0:
-            sys.exit(f"[crossplay-shards] Aborted: {fail} shard(s) failed; live cache untouched.")
+            sys.exit(f"[shards] Aborted: {fail} shard(s) failed; live cache untouched.")
 
-        # Atomically publish all 17 staged objects only after every shard succeeded.
-        for idx in AFFECTED_SHARDS:
+        # Invalidate the build stamp before replacing any live shard so an interrupted
+        # publish can never leave a stale stamp describing a mixed v98/v100 cache.
+        stamp_path = os.path.join(CACHE_DIR, ".build_stamp")
+        try:
+            os.unlink(stamp_path)
+        except FileNotFoundError:
+            pass
+
+        # Atomically publish all staged objects only after every shard succeeded.
+        for idx in target_shards:
             os.replace(
                 os.path.join(stage_dir, f"shard_{idx:03d}.o"),
                 os.path.join(OUT_DIR, f"shard_{idx:03d}.o"),
             )
-        print(f"[crossplay-shards] Published {ok}/{len(AFFECTED_SHARDS)} shards atomically in {time.time()-t_start:.1f}s")
+        print(f"[shards] Published {ok}/{len(target_shards)} shards atomically in {time.time()-t_start:.1f}s")
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
 

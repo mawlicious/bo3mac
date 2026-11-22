@@ -738,7 +738,8 @@ SHIM_DEF(g_1000fb3c5) {
     }
     return ret_i64(n);
 }
-SHIM_DEF(g_1000fb503) { SHIM_UNUSED_ALL(); return ret_u64(0); }
+extern FILE *bo3_hksf_fopen(const char *filename, const char *opentype);
+SHIM_DEF(g_1000fb503) { SHIM_UNUSED_ALL(); return ret_ptr(bo3_hksf_fopen((const char *)rdi, (const char *)rsi)); }
 SHIM_DEF(g_1000fb53a) { SHIM_UNUSED_ALL(); return ret_ptr(getcwd((char *)rdi, (size_t)(int32_t)rsi)); }
 SHIM_DEF(g_1000fb548) {
     // gmtime_s(struct tm *out, const time_t *t)

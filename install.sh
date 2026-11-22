@@ -183,7 +183,7 @@ ok "Built build/bo3_lift and build/bo3_loader"
 step "5/7" "Recompiling Black Ops III into native $MCPU ARM64 machine code (this takes ~2–4 minutes)..."
 SHARDS_DIR="$CACHE_DIR/core_shards"
 BUILD_STAMP="$CACHE_DIR/.build_stamp"
-WANT_STAMP="exe=${EXE_SHA} mcpu=${MCPU} crossplay=${CROSSPLAY}"
+WANT_STAMP="exe=${EXE_SHA} mcpu=${MCPU} crossplay=${CROSSPLAY} workshop=1"
 CUR_STAMP=""
 [ -f "$BUILD_STAMP" ] && CUR_STAMP="$(cat "$BUILD_STAMP" 2>/dev/null || true)"
 
@@ -194,7 +194,8 @@ fi
 
 NEED_FULL_SHARDS=0
 if [ "$REBUILD" -eq 1 ] || [ "$EXISTING_SHARDS" -lt 81 ] || [ -z "$CUR_STAMP" ] ||
-   ! printf '%s' "$CUR_STAMP" | grep -q "exe=${EXE_SHA} mcpu=${MCPU} "; then
+   ! printf '%s' "$CUR_STAMP" | grep -q "exe=${EXE_SHA} mcpu=${MCPU} " ||
+   { [ "$EXE_SHA" != "$STOCK_SHA256" ] && ! printf '%s' "$CUR_STAMP" | grep -q "workshop=1"; }; then
     NEED_FULL_SHARDS=1
 fi
 
@@ -209,16 +210,24 @@ fi
 
 if [ "$CROSSPLAY" -eq 1 ]; then
     if [ "$CUR_STAMP" != "$WANT_STAMP" ] || [ "$NEED_FULL_SHARDS" -eq 1 ]; then
-        echo "    Applying Windows v100 cross-play protocol shards (never touches Steam files)..."
+        echo "    Applying Workshop/Custom-Map & Windows v100 cross-play shards (never touches Steam files)..."
+        rm -f "$BUILD_STAMP"
         BO3MAC_CACHE_DIR="$CACHE_DIR" BO3MAC_MCPU="$MCPU" \
             python3 "$ROOT/tools/apply_crossplay_shards.py" apply
     fi
-    ok "Windows v100 cross-play shards ready"
-elif [ "$CUR_STAMP" != "$WANT_STAMP" ] && [ "$NEED_FULL_SHARDS" -eq 0 ] && [ "$EXE_SHA" = "$STOCK_SHA256" ]; then
-    echo "    Reverting cross-play shards to stock v98 (--no-crossplay)..."
-    BO3MAC_CACHE_DIR="$CACHE_DIR" BO3MAC_MCPU="$MCPU" \
-        python3 "$ROOT/tools/apply_crossplay_shards.py" revert
-    ok "Stock v98 shards ready"
+    ok "Workshop/Custom-Map & Windows v100 cross-play shards ready"
+elif [ "$EXE_SHA" = "$STOCK_SHA256" ] && { [ "$CUR_STAMP" != "$WANT_STAMP" ] || [ "$NEED_FULL_SHARDS" -eq 1 ]; }; then
+    rm -f "$BUILD_STAMP"
+    if [ "$NEED_FULL_SHARDS" -eq 1 ]; then
+        echo "    Applying Workshop/Custom-Map shards for stock v98 (--no-crossplay)..."
+        BO3MAC_CACHE_DIR="$CACHE_DIR" BO3MAC_MCPU="$MCPU" \
+            python3 "$ROOT/tools/apply_crossplay_shards.py" workshop
+    else
+        echo "    Reverting cross-play shards to stock v98 while keeping Workshop/Custom-Map support..."
+        BO3MAC_CACHE_DIR="$CACHE_DIR" BO3MAC_MCPU="$MCPU" \
+            python3 "$ROOT/tools/apply_crossplay_shards.py" revert
+    fi
+    ok "Stock v98 + Workshop/Custom-Map shards ready"
 fi
 printf '%s\n' "$WANT_STAMP" > "$BUILD_STAMP"
 

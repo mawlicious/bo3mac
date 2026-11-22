@@ -42,13 +42,88 @@ extern uint32_t bo3_init_thread_tid(GuestContext *ctx, uint32_t forced_tid);
 // 1. Path Normalization (Windows '\' -> POSIX '/', case-insensitive lookup)
 // =========================================================================
 
+extern int bo3_workshop_physics_dir(char *out, size_t out_sz);
+
+// Returns 1 if the FIRST path component of `p` is `mods` or `usermaps` (case-insensitive).
+static int bo3_is_usermod_path(const char *p) {
+    if (!p || !p[0]) return 0;
+    const char *s = p;
+    while (*s == '/' || *s == '\\') s++;
+    if (!*s) return 0;
+    const char *end = s;
+    while (*end && *end != '/' && *end != '\\') end++;
+    size_t len = (size_t)(end - s);
+    return (len == 4 && strncasecmp(s, "mods", 4) == 0) ||
+           (len == 8 && strncasecmp(s, "usermaps", 8) == 0);
+}
+
+// Returns 1 if `p` starts with "C:\Emu\AppAssets" (case-insensitive, either slash).
+static int bo3_has_appassets_prefix(const char *p) {
+    if (!p) return 0;
+    if ((p[0] != 'C' && p[0] != 'c') || p[1] != ':') return 0;
+    if (p[2] != '\\' && p[2] != '/') return 0;
+    if (strncasecmp(p + 3, "Emu", 3) != 0) return 0;
+    if (p[6] != '\\' && p[6] != '/') return 0;
+    if (strncasecmp(p + 7, "AppAssets", 9) != 0) return 0;
+    char next = p[16];
+    return next == '\0' || next == '/' || next == '\\';
+}
+
 static void bo3_normalize_path(const char *in, char *out, size_t out_sz) {
     if (!in || out_sz == 0) { if (out_sz) out[0] = 0; return; }
     // Skip leading "\\?\" if present
     if (in[0] == '\\' && in[1] == '\\' && in[2] == '?' && in[3] == '\\') in += 4;
     size_t j = 0;
-    // Remap Windows drive prefix (e.g. "C:\Emu\...") to ~/Library/Application Support/Call of Duty Black Ops III/
-    if (isalpha((unsigned char)in[0]) && in[1] == ':' && (in[2] == '\\' || in[2] == '/' || in[2] == 0)) {
+
+    // Aspyr's C:\Emu\AppAssets (with either slash) represents the read-only Assets CWD.
+    // External mods and custom maps (mods/, usermaps/) live in the Steam BO3 root (../../../).
+    int handled_prefix = 0;
+    if (bo3_has_appassets_prefix(in)) {
+        in += 16;
+        while (*in == '/' || *in == '\\') in++;
+        if (bo3_is_usermod_path(in)) {
+            j = strlcpy(out, "../../../", out_sz);
+            if (j >= out_sz) j = out_sz - 1;
+        } else if (*in == '\0') {
+            strlcpy(out, ".", out_sz);
+            return;
+        }
+        handled_prefix = 1;
+    }
+
+    // Also redirect <CWD>/mods and <CWD>/usermaps to the Steam BO3 game root (../../../).
+    if (!handled_prefix && in[0] == '/') {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            size_t clen = strlen(cwd);
+            if (clen > 1 && strncmp(in, cwd, clen) == 0 &&
+                (in[clen] == '/' || in[clen] == '\\')) {
+                const char *rest = in + clen;
+                while (*rest == '/' || *rest == '\\') rest++;
+                if (bo3_is_usermod_path(rest)) {
+                    j = strlcpy(out, "../../../", out_sz);
+                    if (j >= out_sz) j = out_sz - 1;
+                    in = rest;
+                    handled_prefix = 1;
+                }
+            }
+        }
+    }
+
+    // Relative mods/... or usermaps/... (and Windows-rooted \mods\... / \usermaps\...)
+    // resolve from the Steam BO3 game root (../../../).
+    if (!handled_prefix && in[0] != '/' && in[0] != '.' &&
+        !(isalpha((unsigned char)in[0]) && in[1] == ':') &&
+        bo3_is_usermod_path(in)) {
+        while (*in == '\\') in++;
+        j = strlcpy(out, "../../../", out_sz);
+        if (j >= out_sz) j = out_sz - 1;
+        handled_prefix = 1;
+    }
+
+    // Other Windows drive prefixes (e.g. "C:\Emu\AppData\...") map to ~/Library/Application Support/Call of Duty Black Ops III/
+    if (!handled_prefix && isalpha((unsigned char)in[0]) && in[1] == ':' &&
+        (in[2] == '\\' || in[2] == '/' || in[2] == 0)) {
         const char *home = getenv("HOME");
         if (!home) home = "/tmp";
         char base[PATH_MAX];
@@ -69,6 +144,45 @@ static void bo3_normalize_path(const char *in, char *out, size_t out_sz) {
     out[j] = 0;
     // Strip trailing slash unless root "/"
     while (j > 1 && out[j - 1] == '/') out[--j] = 0;
+}
+
+// Redirect read-only Physics/<map>_navmesh.hkt and _navvolume.hkt lookups to our
+// native Havok navigation cache (~/Library/Application Support/bo3mac/Physics/)
+// when no stock macOS nav file exists (all custom maps) or for cp_mi_cairo_infection2.
+// Called AFTER case-insensitive stock path resolution so existing stock files are never shadowed.
+static int bo3_maybe_overlay_physics_path(char *out, size_t out_sz) {
+    const char *p = out;
+    if (p[0] == '.' && p[1] == '/') p += 2;
+
+    const char *phys = NULL;
+    if (strncasecmp(p, "Physics/", 8) == 0) {
+        phys = p + 8;
+    } else {
+        const char *hit = strcasestr(p, "/Physics/");
+        if (hit) phys = hit + 9;
+    }
+    if (!phys || !phys[0] || strchr(phys, '/') != NULL) return 0;
+
+    size_t flen = strlen(phys);
+    int is_nav = (flen > 12 && strcasecmp(phys + flen - 12, "_navmesh.hkt") == 0) ||
+                 (flen > 14 && strcasecmp(phys + flen - 14, "_navvolume.hkt") == 0);
+    if (!is_nav) return 0;
+
+    int force_override = (strncasecmp(phys, "cp_mi_cairo_infection2_", 23) == 0);
+    struct stat orig_st;
+    if (!force_override && stat(out, &orig_st) == 0) return 0;
+
+    char pdir_raw[PATH_MAX], pdir[PATH_MAX];
+    if (!bo3_workshop_physics_dir(pdir_raw, sizeof(pdir_raw))) return 0;
+    if (!realpath(pdir_raw, pdir)) return 0;
+    char cand[PATH_MAX];
+    int n = snprintf(cand, sizeof(cand), "%s/%s", pdir, phys);
+    if (n <= 0 || (size_t)n >= sizeof(cand) || (size_t)n >= out_sz) return 0;
+    struct stat st;
+    if (lstat(cand, &st) != 0 || S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) return 0;
+
+    memcpy(out, cand, (size_t)n + 1);
+    return 1;
 }
 
 // Optional Windows v100 cross-play zone fastfile overlay (core_patch.ff, mp_patch.ff, zm_patch.ff).
@@ -151,6 +265,17 @@ static inline int bo3_fopen_mode_is_readonly(const char *mode) {
     return mode && mode[0] == 'r' && strchr(mode, '+') == NULL;
 }
 
+// Open a resolved path safely; when `overlaid` is non-zero (read-only overlay),
+// use O_RDONLY | O_NOFOLLOW to close any check-to-open symlink race.
+static FILE *bo3_fopen_safe(const char *path, const char *mode, int overlaid) {
+    if (!overlaid) return fopen(path, mode);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, mode);
+    if (!fp) close(fd);
+    return fp;
+}
+
 // Resolve existing path case-insensitively segment by segment if exact stat fails.
 // allow_overlay must be 1 ONLY for read-only opens and metadata queries.
 static int bo3_resolve_path_ex(const char *win_path, char *out, size_t out_sz, int allow_overlay) {
@@ -158,7 +283,10 @@ static int bo3_resolve_path_ex(const char *win_path, char *out, size_t out_sz, i
     if (!out[0]) return 0;
     if (allow_overlay && bo3_maybe_overlay_zone_path(out, out_sz)) return 1;
     struct stat st;
-    if (stat(out, &st) == 0) return 0;
+    if (stat(out, &st) == 0) {
+        if (allow_overlay && bo3_maybe_overlay_physics_path(out, out_sz)) return 1;
+        return 0;
+    }
 
     // Walk segments for case-insensitive match
     char work[PATH_MAX];
@@ -214,6 +342,7 @@ static int bo3_resolve_path_ex(const char *win_path, char *out, size_t out_sz, i
         p = slash + 1;
     }
     strlcpy(out, built, out_sz);
+    if (allow_overlay && bo3_maybe_overlay_physics_path(out, out_sz)) return 1;
     return 0;
 }
 
@@ -229,21 +358,146 @@ static uint64_t unix_to_filetime(time_t t) {
 // 2. Aspyr Path-Normalized CRT Wrappers (0x1000ec* - 0x1000ed*, 0x1000fb50b)
 // =========================================================================
 
+// Parse ANSI C fopen mode string into POSIX open(2) flags. Returns -1 if invalid.
+static int bo3_fopen_mode_to_oflags(const char *mode) {
+    if (!mode || !mode[0]) return -1;
+    int plus = (strchr(mode, '+') != NULL);
+    int excl = (strchr(mode, 'x') != NULL);
+    int flags = 0;
+    switch (mode[0]) {
+        case 'r': flags = plus ? O_RDWR : O_RDONLY; break;
+        case 'w': flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC; break;
+        case 'a': flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND; break;
+        default: return -1;
+    }
+    if (excl) flags |= O_EXCL;
+    return flags;
+}
+
+// Find a case-insensitive entry matching `seg` inside directory `dirfd`.
+// Returns 1 and writes matched name to `matched` on hit, else 0.
+static int bo3_dirfd_find_ci(int dirfd, const char *seg, char *matched, size_t matched_sz) {
+    int dupfd = dup(dirfd);
+    if (dupfd < 0) return 0;
+    DIR *d = fdopendir(dupfd);
+    if (!d) { close(dupfd); return 0; }
+    int found = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcasecmp(de->d_name, seg) == 0) {
+            if (strlcpy(matched, de->d_name, matched_sz) < matched_sz) found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+// 0x1000fb503: hksf_fopen_internal(const char *filename, const char *opentype, int unknown)
+// Aspyr's stock Mac build stubs this out to return NULL, breaking Lua io.open in Workshop mods.
+// Sandboxed strictly to the Steam BO3 game root (../../../) via openat(..., O_NOFOLLOW) per
+// path component: rejects absolute paths, drive letters, "..", oversized paths, dangling or
+// in-tree symlink escapes, TOCTOU races, and writes into CoDBlkOps3.app.
+FILE *bo3_hksf_fopen(const char *filename, const char *opentype) {
+    if (!filename || !filename[0] || !opentype || !opentype[0]) return NULL;
+    int oflags = bo3_fopen_mode_to_oflags(opentype);
+    if (oflags < 0) return NULL;
+    if (filename[0] == '/' || filename[0] == '\\' ||
+        (isalpha((unsigned char)filename[0]) && filename[1] == ':')) {
+        return NULL;
+    }
+
+    char rel[PATH_MAX];
+    size_t j = 0;
+    for (size_t i = 0; filename[i]; i++) {
+        char c = (filename[i] == '\\') ? '/' : filename[i];
+        if (c == '/' && j > 0 && rel[j - 1] == '/') continue;
+        if (j + 1 >= sizeof(rel)) return NULL; // Reject instead of silently truncating
+        rel[j++] = c;
+    }
+    while (j > 0 && rel[j - 1] == '/') j--;
+    rel[j] = '\0';
+    if (j == 0) return NULL;
+
+    // Validate segments: reject ".." traversal and writes into CoDBlkOps3.app.
+    int is_write = !bo3_fopen_mode_is_readonly(opentype);
+    int seg_idx = 0;
+    for (const char *s = rel; *s; ) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        const char *end = s;
+        while (*end && *end != '/') end++;
+        size_t slen = (size_t)(end - s);
+        if (slen == 2 && s[0] == '.' && s[1] == '.') return NULL;
+        if (!(slen == 1 && s[0] == '.')) {
+            if (is_write && seg_idx == 0 && slen == 14 && strncasecmp(s, "CoDBlkOps3.app", 14) == 0) {
+                return NULL;
+            }
+            seg_idx++;
+        }
+        s = end;
+    }
+    if (seg_idx == 0) return NULL;
+
+    int dirfd = open("../../../", O_RDONLY | O_DIRECTORY);
+    if (dirfd < 0) return NULL;
+
+    char *p = rel;
+    while (*p == '/') p++;
+    for (;;) {
+        char *slash = strchr(p, '/');
+        if (slash) {
+            *slash = '\0';
+            if (strcmp(p, ".") != 0) {
+                int nextfd = openat(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+                if (nextfd < 0 && errno == ENOENT) {
+                    char ci_name[NAME_MAX + 1];
+                    if (bo3_dirfd_find_ci(dirfd, p, ci_name, sizeof(ci_name))) {
+                        nextfd = openat(dirfd, ci_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+                    }
+                }
+                close(dirfd);
+                if (nextfd < 0) return NULL;
+                dirfd = nextfd;
+            }
+            p = slash + 1;
+            while (*p == '/') p++;
+            if (!*p) { close(dirfd); return NULL; }
+        } else {
+            if (strcmp(p, ".") == 0) { close(dirfd); return NULL; }
+            const char *leaf = p;
+            char ci_name[NAME_MAX + 1];
+            struct stat lst;
+            if (fstatat(dirfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT) {
+                if (bo3_dirfd_find_ci(dirfd, leaf, ci_name, sizeof(ci_name))) {
+                    leaf = ci_name;
+                }
+            }
+            int fd = openat(dirfd, leaf, oflags | O_NOFOLLOW, 0666);
+            close(dirfd);
+            if (fd < 0) return NULL;
+            FILE *fp = fdopen(fd, opentype);
+            if (!fp) close(fd);
+            return fp;
+        }
+    }
+}
+
 // 0x1000eceaf: fopen(path, mode)
 SHIM_DEF(g_1000eceaf) {
     SHIM_UNUSED_ALL();
     const char *mode = (const char *)rsi;
     char path[PATH_MAX];
-    bo3_resolve_path_ex((const char *)rdi, path, sizeof(path), bo3_fopen_mode_is_readonly(mode));
-    return ret_ptr(fopen(path, mode));
+    int overlaid = bo3_resolve_path_ex((const char *)rdi, path, sizeof(path), bo3_fopen_mode_is_readonly(mode));
+    return ret_ptr(bo3_fopen_safe(path, mode, overlaid));
 }
 // 0x1000fb50b: fopen_s(FILE **out, const char *path, const char *mode)
 SHIM_DEF(g_1000fb50b) {
     SHIM_UNUSED_ALL();
     const char *mode = (const char *)rdx;
     char path[PATH_MAX];
-    bo3_resolve_path_ex((const char *)rsi, path, sizeof(path), bo3_fopen_mode_is_readonly(mode));
-    FILE *fp = fopen(path, mode);
+    int overlaid = bo3_resolve_path_ex((const char *)rsi, path, sizeof(path), bo3_fopen_mode_is_readonly(mode));
+    FILE *fp = bo3_fopen_safe(path, mode, overlaid);
     if (rdi) *(FILE **)rdi = fp;
     return ret_i64(fp ? 0 : (errno ? errno : ENOENT));
 }
