@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 260" width="1120" height="260" role="img" aria-label="bo3mac static recompilation and native runtime pipeline">
+  <defs>
+    <linearGradient id="pbg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#131a24"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#ff7a18"/>
+    </marker>
+  </defs>
+
+  <rect width="1120" height="260" rx="14" fill="url(#pbg)" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1.2"/>
+
+  <text x="28" y="34" font-family="'SF Mono', ui-monospace, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="1.4" fill="#ff8c3a">HOW BO3MAC WORKS (100% LOCAL ON YOUR MAC — ZERO GAME FILES DISTRIBUTED)</text>
+
+  <!-- Box 1 -->
+  <rect x="28" y="54" width="230" height="176" rx="10" fill="#161d2b" stroke="#334155" stroke-width="1.2"/>
+  <text x="44" y="80" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#ff8c3a">1 · VERIFY STEAM BINARY</text>
+  <text x="44" y="106" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f8fafc">CoDBlkOps3_Exe</text>
+  <text x="44" y="130" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Auto-locates Steam BO3</text>
+  <text x="44" y="150" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• SHA-256 verified read-only</text>
+  <text x="44" y="170" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Never mutates Steam files</text>
+  <text x="44" y="190" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Applies Workshop + v100</text>
+  <text x="44" y="208" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">  patches in temp copy</text>
+
+  <line x1="258" y1="142" x2="294" y2="142" stroke="#ff7a18" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box 2 -->
+  <rect x="300" y="54" width="240" height="176" rx="10" fill="#161d2b" stroke="#334155" stroke-width="1.2"/>
+  <text x="316" y="80" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#ff8c3a">2 · STATIC RECOMPILER</text>
+  <text x="316" y="106" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f8fafc">Zydis → LLVM IR → ARM64</text>
+  <text x="316" y="130" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• 81 parallel ARM64 shards</text>
+  <text x="316" y="150" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Tuned for host -mcpu=apple-m*</text>
+  <text x="316" y="170" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Strict TSO memory ordering</text>
+  <text x="316" y="190" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Diff-tested vs Rosetta x86_64</text>
+  <text x="316" y="208" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• ~2–4 min one-time local build</text>
+
+  <line x1="540" y1="142" x2="576" y2="142" stroke="#ff7a18" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box 3 -->
+  <rect x="582" y="54" width="244" height="176" rx="10" fill="#161d2b" stroke="#334155" stroke-width="1.2"/>
+  <text x="598" y="80" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#ff8c3a">3 · NATIVE METAL + OS SHIMS</text>
+  <text x="598" y="106" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f8fafc">Direct3D 11 → Metal</text>
+  <text x="598" y="130" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• DXBC → MSL + Generic.metallib</text>
+  <text x="598" y="150" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• MetalFX Spatial + Lossy RT</text>
+  <text x="598" y="170" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• TBDR deferred clears + PSO cache</text>
+  <text x="598" y="190" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• CoreAudio · VideoToolbox · GC</text>
+  <text x="598" y="208" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#94a3b8">• Native arm64 Steam + Havok nav</text>
+
+  <line x1="826" y1="142" x2="862" y2="142" stroke="#ff7a18" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box 4 -->
+  <rect x="868" y="54" width="224" height="176" rx="10" fill="#1b1510" stroke="#ff7a18" stroke-opacity="0.7" stroke-width="1.4"/>
+  <text x="884" y="80" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#4ade80">4 · PLAY NATIVELY</text>
+  <text x="884" y="106" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f8fafc">/Applications/BO3 Mac.app</text>
+  <text x="884" y="130" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#cbd5e1">• Double-click macOS app</text>
+  <text x="884" y="150" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#cbd5e1">• Live F10 / ⌘, settings UI</text>
+  <text x="884" y="170" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#cbd5e1">• Zero Rosetta 2 required</text>
+  <text x="884" y="190" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#cbd5e1">• Ready for macOS 28+</text>
+  <text x="884" y="208" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12.5" fill="#cbd5e1">• Online Zombies &amp; Custom Maps</text>
+</svg>

@@ -183,7 +183,9 @@ ok "Built build/bo3_lift and build/bo3_loader"
 step "5/7" "Recompiling Black Ops III into native $MCPU ARM64 machine code (this takes ~2–4 minutes)..."
 SHARDS_DIR="$CACHE_DIR/core_shards"
 BUILD_STAMP="$CACHE_DIR/.build_stamp"
-WANT_STAMP="exe=${EXE_SHA} mcpu=${MCPU} crossplay=${CROSSPLAY} workshop=1"
+LIFTER_SHA="$(shasum -a 256 "$ROOT/build/bo3_lift" | awk '{print $1}' | cut -c1-16)"
+CLANG_ID="$(clang --version | head -n 1 | shasum -a 256 | awk '{print $1}' | cut -c1-12)"
+WANT_STAMP="exe=${EXE_SHA} mcpu=${MCPU} lifter=${LIFTER_SHA} clang=${CLANG_ID} crossplay=${CROSSPLAY} workshop=1"
 CUR_STAMP=""
 [ -f "$BUILD_STAMP" ] && CUR_STAMP="$(cat "$BUILD_STAMP" 2>/dev/null || true)"
 
@@ -194,7 +196,7 @@ fi
 
 NEED_FULL_SHARDS=0
 if [ "$REBUILD" -eq 1 ] || [ "$EXISTING_SHARDS" -lt 81 ] || [ -z "$CUR_STAMP" ] ||
-   ! printf '%s' "$CUR_STAMP" | grep -q "exe=${EXE_SHA} mcpu=${MCPU} " ||
+   ! printf '%s' "$CUR_STAMP" | grep -q "exe=${EXE_SHA} mcpu=${MCPU} lifter=${LIFTER_SHA} clang=${CLANG_ID} " ||
    { [ "$EXE_SHA" != "$STOCK_SHA256" ] && ! printf '%s' "$CUR_STAMP" | grep -q "workshop=1"; }; then
     NEED_FULL_SHARDS=1
 fi
