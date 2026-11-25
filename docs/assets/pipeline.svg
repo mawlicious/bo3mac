@@ -11,7 +11,7 @@
 
   <rect width="1120" height="260" rx="14" fill="url(#pbg)" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1.2"/>
 
-  <text x="28" y="34" font-family="'SF Mono', ui-monospace, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="1.4" fill="#ff8c3a">HOW BO3MAC WORKS (100% LOCAL ON YOUR MAC — ZERO GAME FILES DISTRIBUTED)</text>
+  <text x="28" y="34" font-family="'SF Mono', ui-monospace, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="1.4" fill="#ff8c3a">HOW BO3MAC WORKS (100% LOCAL ON YOUR MAC: ZERO GAME FILES DISTRIBUTED)</text>
 
   <!-- Box 1 -->
   <rect x="28" y="54" width="230" height="176" rx="10" fill="#161d2b" stroke="#334155" stroke-width="1.2"/>
