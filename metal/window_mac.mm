@@ -1740,8 +1740,13 @@ void bo3_win_show_cursor(bool show) {
     int want = show ? 1 : 0;
     if (g_last_show_req.exchange(want, std::memory_order_acq_rel) == want) return;
     auto update = ^{
-        g_want_cursor_hidden = !show;
-        if (!show) {
+        // Always read the latest requested visibility on the main thread so rapid or
+        // cross-thread ShowCursor/SetCursor transitions can never apply out of order.
+        int cur_want = g_last_show_req.load(std::memory_order_acquire);
+        if (cur_want < 0) return;
+        bool cur_show = (cur_want != 0);
+        g_want_cursor_hidden = !cur_show;
+        if (!cur_show) {
             NSWindow *main_nsw = nil;
             {
                 std::lock_guard<std::mutex> lk(g_win_mtx);

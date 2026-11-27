@@ -1826,8 +1826,8 @@ SHIM_DEF(g_1001144ab) { // SetCursor(HCURSOR hCursor)
     uint64_t prev = g_current_cursor;
     g_current_cursor = rdi;
     int show = (g_cursor_count >= 0 && g_current_cursor != 0);
-    pthread_mutex_unlock(&g_cursor_lock);
     bo3_win_show_cursor(show != 0);
+    pthread_mutex_unlock(&g_cursor_lock);
     return ret_u64(prev);
 }
 SHIM_DEF(g_100115c95) { // ShowCursor(BOOL bShow)
@@ -1835,8 +1835,8 @@ SHIM_DEF(g_100115c95) { // ShowCursor(BOOL bShow)
     pthread_mutex_lock(&g_cursor_lock);
     int32_t c = ((int32_t)rdi) ? (++g_cursor_count) : (--g_cursor_count);
     int show = (c >= 0 && g_current_cursor != 0);
-    pthread_mutex_unlock(&g_cursor_lock);
     bo3_win_show_cursor(show != 0);
+    pthread_mutex_unlock(&g_cursor_lock);
     return ret_i64(c);
 }
 SHIM_DEF(g_100115da9) { SHIM_UNUSED_ALL(); bo3_win_set_cursor_pos((int32_t)rdi, (int32_t)rsi); return ret_u64(1); }
