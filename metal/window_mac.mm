@@ -66,7 +66,11 @@ static_assert(sizeof(Win32RawInputMouse) == 48, "RAWINPUT mouse must be 48 bytes
 
 #define BO3_MAC_HWND_MAGIC 0x424F334D574E4421ULL
 
-@class Bo3MetalView;
+// Custom Metal NSView receiving all Cocoa keyboard/mouse events
+@interface Bo3MetalView : NSView <NSWindowDelegate>
+@property (nonatomic, assign) uint64_t bo3Hwnd;
+@property (nonatomic, strong) CAMetalLayer *metalLayer;
+@end
 
 // Custom NSWindow subclass: borderless windows return NO from canBecomeKeyWindow/MainWindow by
 // default, and constrainFrameRect:toScreen: pushes normal-level windows below the menu bar.
@@ -120,13 +124,18 @@ static uint64_t g_last_registered_wndproc = 0;
 static std::atomic<int32_t> g_screen_w{0};
 static std::atomic<int32_t> g_screen_h{0};
 static std::atomic<uint64_t> g_raw_input_hwnd{0};
-static bool g_cursor_hidden = false;      // main-thread only: actual macOS cursor/association state
-static bool g_want_cursor_hidden = false; // main-thread only: requested by game via ShowCursor/SetCursor
+static bool g_cursor_hidden = false;      // main-thread only: logical capture active state
+static bool g_want_cursor_hidden = false; // main-thread only: requested by game via ShowCursor
+static bool g_mouse_dissociated = false;  // main-thread only: CGAssociateMouseAndMouseCursorPosition(false) succeeded
 static int  g_cursor_hide_depth = 0;      // main-thread only: balanced [NSCursor hide/unhide] depth (0 or 1)
-static bool g_capture_frozen_valid = false; // main-thread only: latched window-local cursor pos once dissociated
-static NSPoint g_capture_frozen_loc = {0, 0};
+static bool g_capture_park_valid = false; // main-thread only: parked global Cocoa screen point for drift detection
+static NSPoint g_capture_park_global = {0, 0};
 static uint32_t g_last_recapture_ms = 0;
+static uint32_t g_recapture_burst_start_ms = 0;
+static uint32_t g_recapture_burst_count = 0;
+static bool     g_drift_recovery_paused = false; // backs off for direct-positioning devices (Universal Control / Sidecar / Parsec)
 static std::atomic<int> g_last_show_req{-1}; // dedup 1000Hz ShowCursor loops in BO3
+static std::atomic<bool> g_show_update_pending{false}; // coalesce queued main-thread visibility updates
 static double g_mouse_accum_x = 0.0;      // main-thread only: fractional delta accumulator
 static double g_mouse_accum_y = 0.0;
 static bool    g_last_os_valid = false;   // main-thread only: last raw OS pointer client pos (never mutated by SetCursorPos)
@@ -201,92 +210,171 @@ static void clear_all_held_inputs() {
     g_last_os_valid = false;
 }
 
-static void apply_cursor_capture_main_thread(bool hide, bool force = false) {
+static NSCursor *blank_cursor_main_thread() {
+    static NSCursor *s_blank = nil;
+    if (!s_blank) {
+        NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+        s_blank = [[NSCursor alloc] initWithImage:img hotSpot:NSZeroPoint];
+    }
+    return s_blank;
+}
+
+static bool main_window_can_capture(NSWindow **out_win, NSView **out_view) {
+    NSWindow *nsw = nil;
+    NSView *nsv = nil;
+    {
+        std::lock_guard<std::mutex> lk(g_win_mtx);
+        if (g_main_window) {
+            nsw = g_main_window->ns_window;
+            nsv = g_main_window->metal_view;
+        }
+    }
+    if (out_win) *out_win = nsw;
+    if (out_view) *out_view = nsv;
+    return nsw != nil && [NSApp isActive] && [nsw isKeyWindow] && !bo3_ui_settings_panel_open();
+}
+
+static void apply_cursor_capture_main_thread(bool hide, bool force = false, bool rewarp = false) {
+    NSWindow *main_nsw = nil;
+    NSView *main_view = nil;
+    {
+        std::lock_guard<std::mutex> lk(g_win_mtx);
+        if (g_main_window) {
+            main_nsw = g_main_window->ns_window;
+            main_view = g_main_window->metal_view;
+        }
+    }
+
     if (hide) {
-        if (!force && g_cursor_hidden) return;
-        if (!g_cursor_hidden) {
-            g_cursor_hidden = true;
+        if (!main_nsw || ![NSApp isActive] || ![main_nsw isKeyWindow] || bo3_ui_settings_panel_open()) {
+            return;
+        }
+        bool was_hidden = g_cursor_hidden;
+        if (!force && was_hidden && g_mouse_dissociated && g_cursor_hide_depth > 0) return;
+
+        bool do_warp = (!was_hidden || rewarp || !g_capture_park_valid);
+        if (!was_hidden) {
             g_mouse_accum_x = 0.0;
             g_mouse_accum_y = 0.0;
             g_raw_dx.store(0, std::memory_order_relaxed);
             g_raw_dy.store(0, std::memory_order_relaxed);
             g_last_os_valid = false;
         }
-        // Park OS cursor at center of the game window before dissociating so it never sits
-        // on the menu bar, Dock, or outside window bounds during FPS mouse capture.
-        NSWindow *main_nsw = nil;
-        {
-            std::lock_guard<std::mutex> lk(g_win_mtx);
-            if (g_main_window) main_nsw = g_main_window->ns_window;
-        }
-        if (main_nsw) {
+
+        if (do_warp) {
+            // Park OS cursor at the center of the visible intersection of the window's content rect
+            // and its display so it never sits on the menu bar, Dock, or outside visible content.
             NSScreen *primary = [NSScreen screens].firstObject ?: [NSScreen mainScreen];
-            if (primary) {
-                NSRect wf = main_nsw.frame;
-                CGFloat cx = wf.origin.x + wf.size.width * 0.5;
-                CGFloat cy = primary.frame.size.height - (wf.origin.y + wf.size.height * 0.5);
-                CGWarpMouseCursorPosition(CGPointMake(cx, cy));
+            NSScreen *win_scr = main_nsw.screen ?: primary;
+            if (primary && win_scr) {
+                NSRect content_r = [main_nsw contentRectForFrameRect:main_nsw.frame];
+                NSRect vis_r = NSIntersectionRect(content_r, win_scr.frame);
+                if (NSIsEmptyRect(vis_r)) vis_r = content_r;
+                CGFloat cocoa_x = vis_r.origin.x + vis_r.size.width * 0.5;
+                CGFloat cocoa_y = vis_r.origin.y + vis_r.size.height * 0.5;
+                CGFloat cg_y = primary.frame.size.height - cocoa_y;
+                if (CGWarpMouseCursorPosition(CGPointMake(cocoa_x, cg_y)) == kCGErrorSuccess) {
+                    g_capture_park_global = [NSEvent mouseLocation];
+                    g_capture_park_valid = true;
+                } else {
+                    g_capture_park_valid = false;
+                }
             }
         }
+
+        // Apply transparent cursor rect + active cursor so even if WindowServer independently
+        // unhides the cursor while association holds, no pointer graphic is drawn over the game.
+        [blank_cursor_main_thread() set];
         if (g_cursor_hide_depth == 0) {
             [NSCursor hide];
             g_cursor_hide_depth = 1;
-        } else {
-            // WindowServer can silently unhide the cursor (e.g. Cmd-Tab, styleMask change, Space
-            // switch, or notification); cycle unhide+hide to keep depth balanced at 1 while forcing re-hide.
+        } else if (force) {
             [NSCursor unhide];
             [NSCursor hide];
         }
-        CGAssociateMouseAndMouseCursorPosition(false);
-        g_capture_frozen_valid = false;
+
+        CGError assoc_err = CGAssociateMouseAndMouseCursorPosition(false);
+        if (assoc_err == kCGErrorSuccess) {
+            g_mouse_dissociated = true;
+            if (!g_capture_park_valid) {
+                g_capture_park_global = [NSEvent mouseLocation];
+                g_capture_park_valid = true;
+            }
+        }
+        g_cursor_hidden = true;
+        if (main_view) [main_nsw invalidateCursorRectsForView:main_view];
+
         uint32_t now = monotonic_ms();
-        g_capture_grace_until_ms = now + 80u;
+        // Only arm the 80ms post-warp spike filter when we actually warped the cursor.
+        if (do_warp) {
+            g_capture_grace_until_ms = now + 80u;
+        }
         g_last_recapture_ms = now;
     } else {
-        if (!force && !g_cursor_hidden && g_cursor_hide_depth == 0) return;
+        if (!force && !g_cursor_hidden && !g_mouse_dissociated && g_cursor_hide_depth == 0) return;
         g_cursor_hidden = false;
-        g_capture_frozen_valid = false;
+        g_capture_park_valid = false;
         g_mouse_accum_x = 0.0;
         g_mouse_accum_y = 0.0;
         g_raw_dx.store(0, std::memory_order_relaxed);
         g_raw_dy.store(0, std::memory_order_relaxed);
         g_last_os_valid = false;
-        CGAssociateMouseAndMouseCursorPosition(true);
+        if (CGAssociateMouseAndMouseCursorPosition(true) == kCGErrorSuccess) {
+            g_mouse_dissociated = false;
+        }
         while (g_cursor_hide_depth > 0) {
             [NSCursor unhide];
             g_cursor_hide_depth--;
         }
+        [[NSCursor arrowCursor] set];
+        if (main_nsw && main_view) [main_nsw invalidateCursorRectsForView:main_view];
     }
 }
 
-// Self-healing cursor capture check on input events: if macOS WindowServer ever silently
-// re-associates pointer movement while gameplay expects hidden/captured mouse (causing
-// ev.locationInWindow to move instead of staying frozen), re-park, re-dissociate, and
-// cycle [NSCursor unhide]/[NSCursor hide] immediately (throttled to avoid spin).
-static void ensure_cursor_capture_on_event(NSWindow *win, NSEvent *ev, bool check_loc) {
+// Self-healing cursor capture check on input events: compares live global [NSEvent mouseLocation]
+// against the actual parked global coordinate (independent of view event coordinates, window moves,
+// or whether the cursor escaped window bounds). Backs off automatically for direct-positioning
+// pointing devices (Universal Control, Sidecar, Parsec, tablets).
+static void ensure_cursor_capture_on_event(NSWindow *win, NSEvent *ev, bool check_drift) {
     if (!g_want_cursor_hidden || bo3_ui_settings_panel_open()) return;
     if (!win || ![win isKeyWindow] || ![NSApp isActive]) return;
-    if (!g_cursor_hidden) {
-        apply_cursor_capture_main_thread(true, true);
+    if (!g_cursor_hidden || !g_mouse_dissociated) {
+        apply_cursor_capture_main_thread(true, true, true);
         return;
+    }
+    if (!check_drift || g_drift_recovery_paused) return;
+    if (ev && ev.CGEvent) {
+        int64_t sub = CGEventGetIntegerValueField(ev.CGEvent, kCGMouseEventSubtype);
+        if (sub == kCGEventMouseSubtypeTabletPoint) return;
     }
     uint32_t now = monotonic_ms();
     if (g_capture_grace_until_ms != 0 && (int32_t)(g_capture_grace_until_ms - now) > 0) {
         return;
     }
-    bool drifted = false;
-    if (check_loc && ev) {
-        NSPoint loc = ev.locationInWindow;
-        if (!g_capture_frozen_valid) {
-            g_capture_frozen_loc = loc;
-            g_capture_frozen_valid = true;
-        } else if (fabs(loc.x - g_capture_frozen_loc.x) > 1.5 ||
-                   fabs(loc.y - g_capture_frozen_loc.y) > 1.5) {
-            drifted = true;
-        }
+    if (!g_capture_park_valid) {
+        g_capture_park_global = [NSEvent mouseLocation];
+        g_capture_park_valid = true;
+        return;
     }
-    if (drifted && (uint32_t)(now - g_last_recapture_ms) >= 100u) {
-        apply_cursor_capture_main_thread(true, true);
+    NSPoint cur = [NSEvent mouseLocation];
+    double dx = fabs(cur.x - g_capture_park_global.x);
+    double dy = fabs(cur.y - g_capture_park_global.y);
+    if ((dx > 1.5 || dy > 1.5) && (uint32_t)(now - g_last_recapture_ms) >= 100u) {
+        if (g_recapture_burst_start_ms == 0 || (uint32_t)(now - g_recapture_burst_start_ms) > 2000u) {
+            g_recapture_burst_start_ms = now;
+            g_recapture_burst_count = 0;
+        }
+        g_recapture_burst_count++;
+        if (g_recapture_burst_count > 5u) {
+            // Direct-positioning device keeps moving the global pointer; stop re-warping until
+            // next focus/mode change (the blank NSCursor still keeps the pointer invisible).
+            g_drift_recovery_paused = true;
+            [blank_cursor_main_thread() set];
+            return;
+        }
+        fprintf(stderr, "[win32-cursor] Self-healed cursor drift (dx=%.1f dy=%.1f)\n", dx, dy);
+        fflush(stderr);
+        apply_cursor_capture_main_thread(true, true, true);
     }
 }
 
@@ -428,12 +516,6 @@ static uint16_t mac_keycode_to_vk(uint16_t kc, uint8_t *out_scancode) {
     if (out_scancode) *out_scancode = sc;
     return vk;
 }
-
-// Custom Metal NSView receiving all Cocoa keyboard/mouse events
-@interface Bo3MetalView : NSView <NSWindowDelegate>
-@property (nonatomic, assign) uint64_t bo3Hwnd;
-@property (nonatomic, strong) CAMetalLayer *metalLayer;
-@end
 
 static std::shared_ptr<Bo3MacWindow> as_win(uint64_t hwnd);
 
@@ -600,9 +682,24 @@ static double mouse_scale_factor() {
 - (void)rightMouseDragged:(NSEvent *)ev { [self mouseMoved:ev]; }
 - (void)otherMouseDragged:(NSEvent *)ev { [self mouseMoved:ev]; }
 
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    if (g_cursor_hidden) {
+        [self addCursorRect:self.bounds cursor:blank_cursor_main_thread()];
+    }
+}
+- (void)cursorUpdate:(NSEvent *)ev {
+    (void)ev;
+    if (g_cursor_hidden && g_want_cursor_hidden && !bo3_ui_settings_panel_open()) {
+        [blank_cursor_main_thread() set];
+    } else {
+        [[NSCursor arrowCursor] set];
+    }
+}
+
 - (void)mouseDown:(NSEvent *)ev {
     if (bo3_ui_settings_panel_open()) return;
-    ensure_cursor_capture_on_event(self.window, ev, false);
+    ensure_cursor_capture_on_event(self.window, ev, true);
     g_mouse_buttons.fetch_or(1, std::memory_order_relaxed);
     g_vk_down[0x01].store(1, std::memory_order_relaxed);
     push_msg([self hwndVal], 0x0201 /* WM_LBUTTONDOWN */, [self mouseWParam], [self mouseLParam:ev]);
@@ -615,7 +712,7 @@ static double mouse_scale_factor() {
 }
 - (void)rightMouseDown:(NSEvent *)ev {
     if (bo3_ui_settings_panel_open()) return;
-    ensure_cursor_capture_on_event(self.window, ev, false);
+    ensure_cursor_capture_on_event(self.window, ev, true);
     g_mouse_buttons.fetch_or(2, std::memory_order_relaxed);
     g_vk_down[0x02].store(1, std::memory_order_relaxed);
     push_msg([self hwndVal], 0x0204 /* WM_RBUTTONDOWN */, [self mouseWParam], [self mouseLParam:ev]);
@@ -628,7 +725,7 @@ static double mouse_scale_factor() {
 }
 - (void)otherMouseDown:(NSEvent *)ev {
     if (bo3_ui_settings_panel_open()) return;
-    ensure_cursor_capture_on_event(self.window, ev, false);
+    ensure_cursor_capture_on_event(self.window, ev, true);
     NSInteger bn = ev.buttonNumber;
     uint64_t lp = [self mouseLParam:ev];
     if (bn == 2) {
@@ -664,6 +761,7 @@ static double mouse_scale_factor() {
 }
 - (void)scrollWheel:(NSEvent *)ev {
     if (bo3_ui_settings_panel_open()) return;
+    ensure_cursor_capture_on_event(self.window, ev, true);
     double raw = ev.hasPreciseScrollingDeltas ? (ev.scrollingDeltaY * 12.0) : (ev.scrollingDeltaY * 120.0);
     int32_t clamped = (int32_t)std::max(-32768.0, std::min(32767.0, raw));
     int16_t delta = (int16_t)clamped;
@@ -760,9 +858,11 @@ static void update_presentation_options_main_thread(uint64_t hwnd, bool active) 
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     (void)notification;
+    g_drift_recovery_paused = false;
+    g_recapture_burst_count = 0;
     update_presentation_options_main_thread(_bo3Hwnd, true);
-    if (g_want_cursor_hidden && !bo3_ui_settings_panel_open()) {
-        apply_cursor_capture_main_thread(true, true);
+    if (g_want_cursor_hidden && main_window_can_capture(nullptr, nullptr)) {
+        apply_cursor_capture_main_thread(true, true, !g_cursor_hidden);
     }
     push_msg([self hwndVal], 0x0006 /* WM_ACTIVATE */, 1, 0);
     push_msg([self hwndVal], 0x0007 /* WM_SETFOCUS */, 0, 0);
@@ -771,11 +871,11 @@ static void update_presentation_options_main_thread(uint64_t hwnd, bool active) 
     (void)notification;
     if (bo3_ui_settings_panel_open()) {
         // Keep game active and fullscreen menu bar/Dock hidden while our own F10 settings overlay has key.
-        apply_cursor_capture_main_thread(false);
+        apply_cursor_capture_main_thread(false, true, false);
         clear_all_held_inputs();
         return;
     }
-    apply_cursor_capture_main_thread(false);
+    apply_cursor_capture_main_thread(false, true, false);
     update_presentation_options_main_thread(_bo3Hwnd, false);
     clear_all_held_inputs();
     push_msg([self hwndVal], 0x0006 /* WM_ACTIVATE */, 0, 0);
@@ -783,7 +883,7 @@ static void update_presentation_options_main_thread(uint64_t hwnd, bool active) 
 }
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
-    apply_cursor_capture_main_thread(false);
+    apply_cursor_capture_main_thread(false, true, false);
     update_presentation_options_main_thread(_bo3Hwnd, false);
     clear_all_held_inputs();
     push_msg([self hwndVal], 0x0010 /* WM_CLOSE */, 0, 0);
@@ -845,7 +945,7 @@ void bo3_win_restore_desktop_sync(void) {
     auto restore = ^{
         @autoreleasepool {
             g_want_cursor_hidden = false;
-            apply_cursor_capture_main_thread(false);
+            apply_cursor_capture_main_thread(false, true, false);
             if ([NSApp presentationOptions] != NSApplicationPresentationDefault) {
                 [NSApp setPresentationOptions:NSApplicationPresentationDefault];
             }
@@ -885,25 +985,24 @@ static void *guest_main_pthread(void *arg) {
 }
 - (void)appDidBecomeActive:(NSNotification *)n {
     (void)n;
-    auto reassert = ^{
-        if (!g_want_cursor_hidden || bo3_ui_settings_panel_open() || ![NSApp isActive]) return;
-        NSWindow *main_nsw = nil;
-        {
-            std::lock_guard<std::mutex> lk(g_win_mtx);
-            if (g_main_window) main_nsw = g_main_window->ns_window;
-        }
-        if (main_nsw && [main_nsw isKeyWindow]) {
-            apply_cursor_capture_main_thread(true, true);
-        }
-    };
-    reassert();
-    // Re-assert once more after Space/Cmd-Tab transition settles in WindowServer.
+    g_drift_recovery_paused = false;
+    g_recapture_burst_count = 0;
+    if (g_want_cursor_hidden && main_window_can_capture(nullptr, nullptr)) {
+        apply_cursor_capture_main_thread(true, true, !g_cursor_hidden);
+    }
+    // Re-assert hide/association once more after Space/Cmd-Tab animation settles in WindowServer
+    // (without re-warping if already captured, avoiding post-warp input stutter).
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
-                   dispatch_get_main_queue(), reassert);
+                   dispatch_get_main_queue(), ^{
+        if (g_want_cursor_hidden && main_window_can_capture(nullptr, nullptr)) {
+            apply_cursor_capture_main_thread(true, true, false);
+        }
+    });
 }
-- (void)appDidResignActive:(NSNotification *)n {
+- (void)appWillResignActive:(NSNotification *)n {
     (void)n;
-    apply_cursor_capture_main_thread(false, true);
+    // Release while still foreground so CGAssociateMouseAndMouseCursorPosition(true) always succeeds.
+    apply_cursor_capture_main_thread(false, true, false);
     clear_all_held_inputs();
 }
 @end
@@ -911,12 +1010,14 @@ static Bo3MenuActions *g_menu_actions = nil;
 
 static void on_settings_panel_visibility(bool open) {
     // Runs on the AppKit main thread: release FPS mouse capture while overlay is open and
-    // restore it seamlessly when dismissed.
+    // restore it seamlessly when dismissed (only if app is active and game window is key).
     if (open) {
         clear_all_held_inputs();
-        apply_cursor_capture_main_thread(false, true);
-    } else if (g_want_cursor_hidden) {
-        apply_cursor_capture_main_thread(true, true);
+        apply_cursor_capture_main_thread(false, true, false);
+    } else if (g_want_cursor_hidden && main_window_can_capture(nullptr, nullptr)) {
+        g_drift_recovery_paused = false;
+        g_recapture_burst_count = 0;
+        apply_cursor_capture_main_thread(true, true, true);
     }
 }
 
@@ -930,8 +1031,8 @@ int bo3_mac_run_with_guest(int (*guest_fn)(int, char **), int argc, char **argv)
                                                      name:NSApplicationDidBecomeActiveNotification
                                                    object:app];
         [[NSNotificationCenter defaultCenter] addObserver:g_menu_actions
-                                                 selector:@selector(appDidResignActive:)
-                                                     name:NSApplicationDidResignActiveNotification
+                                                 selector:@selector(appWillResignActive:)
+                                                     name:NSApplicationWillResignActiveNotification
                                                    object:app];
         NSMenu *menubar = [[NSMenu alloc] init];
         NSMenuItem *appItem = [[NSMenuItem alloc] init];
@@ -1158,9 +1259,12 @@ static void apply_window_mode_main_thread(uint64_t hwnd) {
         win.bo3InModeTransition = NO;
         bo3_ui_sync_layout();
         // Changing styleMask / presentationOptions / frame can make WindowServer unhide or
-        // re-associate the OS cursor even while g_cursor_hidden is true; re-assert capture now.
-        if (app_active && [win isKeyWindow] && g_want_cursor_hidden && !bo3_ui_settings_panel_open()) {
-            apply_cursor_capture_main_thread(true, true);
+        // re-associate the OS cursor even while g_cursor_hidden is true; re-check live active state
+        // and re-assert capture with fresh warp coordinates.
+        if (g_want_cursor_hidden && [NSApp isActive] && [win isKeyWindow] && !bo3_ui_settings_panel_open()) {
+            g_drift_recovery_paused = false;
+            g_recapture_burst_count = 0;
+            apply_cursor_capture_main_thread(true, true, true);
         }
     }
 }
@@ -1321,16 +1425,17 @@ void bo3_win_destroy(uint64_t hwnd) {
     }
     if (was_main) {
         g_last_show_req.store(-1, std::memory_order_release);
-        clear_all_held_inputs();
     }
     if (nsw || nsv || was_main) {
         auto teardown = ^{
             @autoreleasepool {
                 if (was_main) {
-                    bo3_ui_close_settings_panel();
-                    bo3_ui_attach_game_window(nullptr);
+                    // Clear g_want_cursor_hidden and detach gameWindow BEFORE closing the settings
+                    // panel so its close handler never re-orders or recaptures a dying window.
                     g_want_cursor_hidden = false;
-                    apply_cursor_capture_main_thread(false);
+                    bo3_ui_attach_game_window(nullptr);
+                    bo3_ui_close_settings_panel();
+                    apply_cursor_capture_main_thread(false, true, false);
                     [NSApp setPresentationOptions:NSApplicationPresentationDefault];
                     clear_all_held_inputs();
                 }
@@ -1738,25 +1843,26 @@ void bo3_win_screen_to_client(uint64_t hwnd, int32_t pt[2]) {
 
 void bo3_win_show_cursor(bool show) {
     int want = show ? 1 : 0;
-    if (g_last_show_req.exchange(want, std::memory_order_acq_rel) == want) return;
+    if (g_last_show_req.exchange(want, std::memory_order_seq_cst) == want) return;
+    // Coalesce queued main-thread visibility updates so rapid hide/show calls never pile up.
+    if (g_show_update_pending.exchange(true, std::memory_order_seq_cst)) return;
     auto update = ^{
-        // Always read the latest requested visibility on the main thread so rapid or
-        // cross-thread ShowCursor/SetCursor transitions can never apply out of order.
-        int cur_want = g_last_show_req.load(std::memory_order_acquire);
+        g_show_update_pending.store(false, std::memory_order_seq_cst);
+        int cur_want = g_last_show_req.load(std::memory_order_seq_cst);
         if (cur_want < 0) return;
         bool cur_show = (cur_want != 0);
+        bool prev_want_hidden = g_want_cursor_hidden;
         g_want_cursor_hidden = !cur_show;
         if (!cur_show) {
-            NSWindow *main_nsw = nil;
-            {
-                std::lock_guard<std::mutex> lk(g_win_mtx);
-                if (g_main_window) main_nsw = g_main_window->ns_window;
-            }
-            if (main_nsw && [main_nsw isKeyWindow] && [NSApp isActive] && !bo3_ui_settings_panel_open()) {
-                apply_cursor_capture_main_thread(true, true);
+            if (main_window_can_capture(nullptr, nullptr)) {
+                if (!prev_want_hidden) {
+                    g_drift_recovery_paused = false;
+                    g_recapture_burst_count = 0;
+                }
+                apply_cursor_capture_main_thread(true, true, !g_cursor_hidden);
             }
         } else {
-            apply_cursor_capture_main_thread(false, true);
+            apply_cursor_capture_main_thread(false, true, false);
         }
     };
     if ([NSThread isMainThread]) update();

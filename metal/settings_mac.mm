@@ -907,10 +907,9 @@ void bo3_ui_close_settings_panel(void) {
             [g_ui.panel.parentWindow removeChildWindow:g_ui.panel];
         }
         [g_ui.panel orderOut:nil];
-        if (g_panel_open.exchange(false, std::memory_order_acq_rel)) {
-            if (g_panel_vis_cb) g_panel_vis_cb(false);
-        }
+        bool was_open = g_panel_open.exchange(false, std::memory_order_acq_rel);
         if (g_ui.gameWindow) [g_ui.gameWindow makeKeyAndOrderFront:nil];
+        if (was_open && g_panel_vis_cb) g_panel_vis_cb(false);
     };
     if ([NSThread isMainThread]) work();
     else dispatch_async(dispatch_get_main_queue(), work);

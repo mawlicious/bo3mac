@@ -1817,26 +1817,21 @@ SHIM_DEF(g_1001155f1) { SHIM_UNUSED_ALL(); return ret_u64(0); }
 SHIM_DEF(g_1001159d6) { SHIM_UNUSED_ALL(); return ret_u64(1); } // AdjustWindowRect
 SHIM_DEF(g_1001159e1) { SHIM_UNUSED_ALL(); return ret_u64(1); }
 SHIM_DEF(g_1001159f9) { SHIM_UNUSED_ALL(); return ret_u64(0x1001); } // LoadCursorA
-static pthread_mutex_t g_cursor_lock = PTHREAD_MUTEX_INITIALIZER;
-static int32_t g_cursor_count = 0;
-static uint64_t g_current_cursor = 0x1001; // default arrow cursor (matches Aspyr IDC_ARROW)
+// Aspyr keeps ShowCursor display count (TLS 0x102104e38) and current HCURSOR (TLS 0x102104e68)
+// per thread. Only ShowCursor drives relative FPS mouse capture; SetCursor preserves per-thread
+// handle semantics without accidentally capturing the pointer if a guest ever passes NULL.
+static _Thread_local int32_t  tl_cursor_count = 0;
+static _Thread_local uint64_t tl_current_cursor = 0x1001; // default IDC_ARROW
 SHIM_DEF(g_1001144ab) { // SetCursor(HCURSOR hCursor)
     SHIM_UNUSED_ALL();
-    pthread_mutex_lock(&g_cursor_lock);
-    uint64_t prev = g_current_cursor;
-    g_current_cursor = rdi;
-    int show = (g_cursor_count >= 0 && g_current_cursor != 0);
-    bo3_win_show_cursor(show != 0);
-    pthread_mutex_unlock(&g_cursor_lock);
+    uint64_t prev = tl_current_cursor;
+    tl_current_cursor = rdi;
     return ret_u64(prev);
 }
 SHIM_DEF(g_100115c95) { // ShowCursor(BOOL bShow)
     SHIM_UNUSED_ALL();
-    pthread_mutex_lock(&g_cursor_lock);
-    int32_t c = ((int32_t)rdi) ? (++g_cursor_count) : (--g_cursor_count);
-    int show = (c >= 0 && g_current_cursor != 0);
-    bo3_win_show_cursor(show != 0);
-    pthread_mutex_unlock(&g_cursor_lock);
+    int32_t c = ((int32_t)rdi) ? (++tl_cursor_count) : (--tl_cursor_count);
+    bo3_win_show_cursor(c >= 0);
     return ret_i64(c);
 }
 SHIM_DEF(g_100115da9) { SHIM_UNUSED_ALL(); bo3_win_set_cursor_pos((int32_t)rdi, (int32_t)rsi); return ret_u64(1); }
